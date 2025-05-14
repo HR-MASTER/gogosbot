@@ -1,19 +1,31 @@
 # .github/workflows/deploy.yml
 
 name: Deploy to Cloud Run
-on: push
+
+on:
+  push:
+    branches:
+      - main
+
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     steps:
+      # 1. Checkout source
       - uses: actions/checkout@v3
+
+      # 2. Authenticate to GCP using ADC (no service-account key)
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v1
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      # 3. Build and push Docker image
       - name: Build and push container
         run: |
           gcloud builds submit --tag gcr.io/${{ secrets.GCP_PROJECT_ID }}/telegram-bot .
+
+      # 4. Deploy to Cloud Run
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy telegram-bot \
@@ -25,4 +37,5 @@ jobs:
 TELEGRAM_TOKEN=${{ secrets.TELEGRAM_TOKEN }},\
 OXAPAY_API_KEY=${{ secrets.OXAPAY_API_KEY }},\
 OWNER_PASSWORD=${{ secrets.OWNER_PASSWORD }},\
-GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
+GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }},\
+OXAPAY_CALLBACK_URL=${{ secrets.OXAPAY_CALLBACK_URL }}
