@@ -1,3 +1,5 @@
+# .github/workflows/deploy.yml
+
 name: Deploy to Cloud Run
 
 on:
@@ -8,7 +10,6 @@ on:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v3
 
@@ -32,4 +33,4 @@ jobs:
 TELEGRAM_TOKEN=${{ secrets.TELEGRAM_TOKEN }},\
 RONGRID_API_KEY=${{ secrets.RONGRID_API_KEY }},\
 OWNER_PASSWORD=${{ secrets.OWNER_PASSWORD }},\
-GOOGLE_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}
+GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
