@@ -146,7 +146,7 @@ texts = {
         "used_before":        "កូដនេះបានប្រើនៅក្នុងក្រុមនេះរួចហើយ។",
         "code_set":           "កូដ {code} បានកំណត់សម្រាប់ {days} ថ្ងៃ។",
         "used_code":          "បានពង្រីក {days} ថ្ងៃ រហូតដល់ {date}។",
-        "period":             "សម្បទានគ្រប់គ្រាន់រហូតដល់ {date} ({days} ថ្ងៃនៅសល់)।",
+        "period":             "សម្បទានគ្រប់គ្រាន់រហូតដល់ {date} ({days} ថ្ងៃនៅសល់)។",
     },
 }
 
@@ -242,13 +242,12 @@ async def choose_language(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await qry.message.reply_text("", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
 
 async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    cid = chat.id
+    cid = update.effective_chat.id
     lang = user_lang.get(update.effective_user.id, "en")
     if cur.execute("SELECT 1 FROM users WHERE user_id=?", (cid,)).fetchone():
         return await update.message.reply_text(texts[lang]["already_registered"])
     exp = datetime.utcnow() + timedelta(days=7)
-    title = chat.title or update.effective_user.username or ""
+    title = update.effective_chat.title or ""
     cur.execute("REPLACE INTO users VALUES (?,?,?,1)",
                 (cid, title, exp.isoformat()))
     conn.commit()
@@ -301,8 +300,7 @@ async def help_owner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(texts["en"]["help"])
 
 async def code_use(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    cid = chat.id
+    cid = update.effective_chat.id
     lang = user_lang.get(update.effective_user.id, "en")
     if not ctx.args:
         return await update.message.reply_text(texts[lang]["invalid_sc"])
@@ -320,7 +318,7 @@ async def code_use(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_row = cur.execute("SELECT expires_at FROM users WHERE user_id=?", (cid,)).fetchone()
     expires = datetime.fromisoformat(user_row[0]) if user_row else now
     new_exp = (expires + timedelta(days=days)) if expires > now else now + timedelta(days=days)
-    title = chat.title or update.effective_user.username or ""
+    title = update.effective_chat.title or ""
     cur.execute("REPLACE INTO users VALUES (?,?,?,1)",
                 (cid, title, new_exp.isoformat()))
     cur.execute("INSERT INTO codes_usage VALUES (?,?,?)", (cid, code, now.isoformat()))
@@ -333,4 +331,137 @@ async def scode_define(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not cur.execute("SELECT 1 FROM owner_sessions WHERE user_id=?", (uid,)).fetchone():
         return
-    if len(ctx
+    if len(ctx.args) != 2 or not re.fullmatch(r"\d{6}", ctx.args[0]) or not ctx.args[1].isdigit():
+        return await update.message.reply_text(texts["en"]["invalid_sc"])
+    code, days = ctx.args[0], int(ctx.args[1])
+    now = datetime.utcnow().isoformat()
+    cur.execute("REPLACE INTO codes VALUES (?,?,?)", (code, days, now))
+    conn.commit()
+    await update.message.reply_text(texts["en"]["code_set"].format(code=code, days=days))
+
+async def stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not cur.execute("SELECT 1 FROM owner_sessions WHERE user_id=?", (uid,)).fetchone():
+        return
+    total = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    active = cur.execute(
+        "SELECT COUNT(*) FROM users WHERE is_active=1 AND expires_at>?",
+        (datetime.utcnow().isoformat(),)
+    ).fetchone()[0]
+    rows = cur.execute("SELECT user_id, username, expires_at, is_active FROM users").fetchall()
+    msg = f"Total users: {total}\nActive users: {active}\n\n"
+    for u, un, exp, act in rows:
+        msg += f"{un or ''} (ID {u}) – Expires {exp[:10]} Active:{bool(act)}\n"
+    await update.message.reply_text(msg)
+
+async def broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not ctx.args or not cur.execute("SELECT 1 FROM owner_sessions WHERE user_id=?", (uid,)).fetchone():
+        return
+    text = " ".join(ctx.args)
+    for (u,) in cur.execute("SELECT user_id FROM users WHERE is_active=1").fetchall():
+        try:
+            await ctx.application.bot.send_message(u, text)
+        except:
+            pass
+    await update.message.reply_text("Broadcast sent.")
+
+async def records(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not cur.execute("SELECT 1 FROM owner_sessions WHERE user_id=?", (uid,)).fetchone():
+        return
+    rows = cur.execute(
+        "SELECT user_id, username, message, timestamp FROM message_logs ORDER BY timestamp DESC"
+    ).fetchall()
+    path = "records.csv"
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["user_id", "username", "message", "timestamp"])
+        w.writerows(rows)
+    await ctx.application.bot.send_document(uid, open(path, "rb"))
+
+async def translate_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # 메시지 로깅 (개별 사용자)
+    uid = update.effective_user.id
+    txt = update.message.text
+    cur.execute(
+        "INSERT INTO message_logs (user_id,username,message,timestamp) VALUES (?,?,?,?)",
+        (uid, update.effective_user.username or "", txt, datetime.utcnow().isoformat())
+    )
+    conn.commit()
+
+    # 구독 확인 (그룹 단위)
+    chat_id = update.effective_chat.id
+    row = cur.execute(
+        "SELECT expires_at,is_active FROM users WHERE user_id=?", (chat_id,)
+    ).fetchone()
+    if not row or row[1] == 0:
+        return
+    expires_at = datetime.fromisoformat(row[0])
+    if expires_at < datetime.utcnow():
+        cur.execute("UPDATE users SET is_active=0 WHERE user_id=?", (chat_id,))
+        conn.commit()
+        return
+
+    # 번역 수행
+    src = await detect_language_async(txt)
+    targets = {"en", "ko", "zh", "vi", "km"} - {src}
+    outs = []
+    for t in targets:
+        tr = await translate_text_async(txt, t)
+        outs.append(f"{t}: {tr}")
+    await update.message.reply_text("\n".join(outs))
+
+# ── Flask app & callback ───────────────────────────────────────────────────────
+app_flask = Flask(__name__)
+bot = Bot(token=TELEGRAM_TOKEN)
+
+@app_flask.route("/")
+def dashboard():
+    total = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    active = cur.execute(
+        "SELECT COUNT(*) FROM users WHERE is_active=1 AND expires_at>?",
+        (datetime.utcnow().isoformat(),)
+    ).fetchone()[0]
+    return render_template_string(
+        "<h1>Bot Dashboard</h1><ul><li>Total users: {{total}}</li>"
+        "<li>Active: {{active}}</li></ul>", total=total, active=active
+    )
+
+@app_flask.route("/healthz")
+def healthz():
+    return "OK"
+
+@app_flask.route("/callback", methods=["POST"])
+def payment_callback():
+    return "", 200
+
+# ── Dispatcher & launch ────────────────────────────────────────────────────────
+app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CallbackQueryHandler(choose_language, pattern=r"^lang_"))
+app.add_handler(CommandHandler("register", register))
+app.add_handler(CommandHandler("stop", stop))
+app.add_handler(CommandHandler("contact", contact))
+app.add_handler(CommandHandler("period", period))
+app.add_handler(CommandHandler("auth", auth))
+app.add_handler(CommandHandler("help", help_owner))
+app.add_handler(CommandHandler("code", code_use))
+app.add_handler(CommandHandler("scode", scode_define))
+app.add_handler(CommandHandler("stats", stats))
+app.add_handler(CommandHandler("broadcast", broadcast))
+app.add_handler(CommandHandler("records", records))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, translate_message))
+
+def main():
+    # 웹훅 제거 및 pending updates 삭제
+    bot.delete_webhook(drop_pending_updates=True)
+
+    threading.Thread(
+        target=lambda: app_flask.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+    ).start()
+
+    app.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    main()
