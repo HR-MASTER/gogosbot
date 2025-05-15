@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 
 import os
+import re
 import sqlite3
 import requests
 import threading
 import asyncio
 import time
+import csv
 from datetime import datetime, timedelta
 
 from flask import Flask, render_template_string, request
@@ -27,58 +29,57 @@ from telegram.ext import (
 
 # ── Environment variables ──────────────────────────────────────────────────────
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN")
-OXAPAY_API_KEY  = os.getenv("OXAPAY_API_KEY")   # Invoice API Key
+OXAPAY_API_KEY  = os.getenv("OXAPAY_API_KEY")
 OWNER_PASSWORD  = os.getenv("OWNER_PASSWORD")
 GOOGLE_API_KEY  = os.getenv("GOOGLE_API_KEY")
 
-if not TELEGRAM_TOKEN:
-    raise RuntimeError("TELEGRAM_TOKEN is not set")
-if not OXAPAY_API_KEY:
-    raise RuntimeError("OXAPAY_API_KEY is not set")
-if not OWNER_PASSWORD:
-    raise RuntimeError("OWNER_PASSWORD is not set")
-if not GOOGLE_API_KEY:
-    raise RuntimeError("GOOGLE_API_KEY is not set")
+for var, name in [(TELEGRAM_TOKEN, "TELEGRAM_TOKEN"),
+                  (OWNER_PASSWORD,  "OWNER_PASSWORD"),
+                  (GOOGLE_API_KEY,  "GOOGLE_API_KEY")]:
+    if not var:
+        raise RuntimeError(f"{name} is not set")
 
 TRANSLATE_URL = "https://translation.googleapis.com/language/translate/v2"
 
 # ── Internationalized texts ────────────────────────────────────────────────────
 texts = {
     "en": {
-        "choose":         "Please select your language:",
-        "help":           "Available commands:\n"
-                          "/register – Activate translation (7 days)\n"
-                          "/stop     – Deactivate translation\n"
-                          "/extend   – Extend subscription\n"
-                          "/contact  – Contact owner\n",
-        "registered":     "Registered until {date}",
-        "stopped":        "Translation stopped.",
-        "extend":         "Choose extension option:",
-        "m1":             "1 month",
-        "y1":             "1 year",
-        "invoice_button": "▶️ Pay now",
-        "ext_success":    "Invoice created:\n{url}",
-        "ext_fail":       "Invoice creation failed: {error}",
-        "ext_notify":     "Your subscription has been extended until {date}.",
+        "choose":     "Please select your language:",
+        "help":       "Available commands:\n"
+                      "/register       – Activate translation (7 days)\n"
+                      "/stop           – Deactivate translation\n"
+                      "/code <CODE>    – Use owner-provided code to extend\n"
+                      "/contact <msg>  – Contact owner\n"
+                      "/records        – Download recent message logs\n",
+        "registered": "Registered until {date}",
+        "stopped":    "Translation stopped.",
+        "auth_fail":  "Authentication failed.",
+        "auth_ok":    "Authenticated as owner. Use /help to view owner commands.",
+        "invalid_sc": "Invalid command or arguments.",
+        "no_codes":   "No such code.",
+        "limit_reached": "Usage limit reached for this code while active.",
+        "code_set":   "Code {code} set for {days} days.",
+        "used_code":  "Subscription extended by {days} days, until {date}.",
     },
     "ko": {
-        "choose":         "언어를 선택하세요:",
-        "help":           "사용 가능한 명령어:\n"
-                          "/register – 번역 활성화 (7일)\n"
-                          "/stop     – 번역 중단\n"
-                          "/extend   – 구독 연장\n"
-                          "/contact  – 소유자에게 문의\n",
-        "registered":     "등록 완료: {date}까지",
-        "stopped":        "번역 기능 중단됨",
-        "extend":         "연장 옵션을 선택하세요:",
-        "m1":             "1개월",
-        "y1":             "1년",
-        "invoice_button": "▶️ 결제하기",
-        "ext_success":    "인보이스 생성됨:\n{url}",
-        "ext_fail":       "인보이스 생성 실패: {error}",
-        "ext_notify":     "구독이 {date}까지 연장되었습니다.",
+        "choose":     "언어를 선택하세요:",
+        "help":       "사용 가능한 명령어:\n"
+                      "/register       – 번역 활성화 (7일)\n"
+                      "/stop           – 번역 중단\n"
+                      "/code <CODE>    – 소유자 코드 사용\n"
+                      "/contact <msg>  – 소유자에게 문의\n"
+                      "/records        – 최근 메시지 로그 다운로드\n",
+        "registered": "등록 완료: {date}까지",
+        "stopped":    "번역 기능 중단됨",
+        "auth_fail":  "인증 실패.",
+        "auth_ok":    "소유자로 인증되었습니다. /help 로 소유자 명령어 확인 가능합니다.",
+        "invalid_sc": "잘못된 명령어 또는 인수입니다.",
+        "no_codes":   "존재하지 않는 코드입니다.",
+        "limit_reached": "활성 구독 중에는 이 코드의 사용 한도를 초과했습니다.",
+        "code_set":   "코드 {code} 가 {days}일 연장용으로 설정되었습니다.",
+        "used_code":  "{days}일 연장 완료, {date}까지 활성화되었습니다.",
     },
-    # Add "zh", "vi", "km" similarly if needed
+    # 추가 언어 필요 시 여기에 정의
 }
 
 # ── Database setup ─────────────────────────────────────────────────────────────
@@ -93,6 +94,22 @@ CREATE TABLE IF NOT EXISTS users (
 );
 CREATE TABLE IF NOT EXISTS owner_sessions (
   user_id     INTEGER PRIMARY KEY
+);
+CREATE TABLE IF NOT EXISTS message_logs (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id     INTEGER,
+  username    TEXT,
+  message     TEXT,
+  timestamp   TEXT
+);
+CREATE TABLE IF NOT EXISTS codes (
+  code        TEXT PRIMARY KEY,
+  days        INTEGER
+);
+CREATE TABLE IF NOT EXISTS codes_usage (
+  user_id     INTEGER,
+  code        TEXT,
+  used_at     TEXT
 );
 """)
 conn.commit()
@@ -122,25 +139,11 @@ async def translate_text_async(text: str, target: str) -> str:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, translate_text, text, target)
 
-# ── Invoice creation helper ────────────────────────────────────────────────────
-def create_invoice(data: dict) -> dict:
-    url = "https://api.oxapay.com/v1/payment/invoice"
-    headers = {
-        "merchant_api_key": OXAPAY_API_KEY,
-        "Content-Type":     "application/json"
-    }
-    r = requests.post(url, json=data, headers=headers)
-    r.raise_for_status()
-    return r.json()
-
 # ── Telegram handlers ──────────────────────────────────────────────────────────
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     kb = [
         [InlineKeyboardButton("English", callback_data="lang_en"),
          InlineKeyboardButton("한국어", callback_data="lang_ko")],
-        [InlineKeyboardButton("中文",    callback_data="lang_zh"),
-         InlineKeyboardButton("Tiếng Việt", callback_data="lang_vi")],
-        [InlineKeyboardButton("ភាសាខ្មែរ", callback_data="lang_km")],
     ]
     await update.message.reply_text(
         texts["en"]["choose"],
@@ -186,73 +189,86 @@ async def contact(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "ko": "메시지가 소유자에게 전달되었습니다."
     }[lang])
 
-async def extend(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    lang   = user_lang.get(update.effective_user.id, "en")
-    uid    = update.effective_user.id
-    now_ts = int(time.time())
-
-    options = [
-        (30, texts[lang]["m1"]),
-        (365, texts[lang]["y1"])
-    ]
-    kb = []
-    for days, label in options:
-        invoice_data = {
-            "amount":              100,
-            "currency":            "USD",
-            "lifetime":            30,
-            "fee_paid_by_payer":   1,
-            "under_paid_coverage": 2.5,
-            "to_currency":         "USDT",
-            "auto_withdrawal":     False,
-            "mixed_payment":       True,
-            "callback_url":        os.getenv("CALLBACK_URL"),
-            "return_url":          os.getenv("RETURN_URL"),
-            "email":               update.effective_user.username or "",
-            "order_id":            f"{uid}-{now_ts}-{days}",
-            "metadata": {
-                "user_id": uid,
-                "days":    days
-            },
-            "thanks_message":      "Thank you!",
-            "description":         f"Subscription {days}-day extension",
-            "sandbox":             False
-        }
-        resp = await asyncio.get_event_loop().run_in_executor(
-            None, create_invoice, invoice_data
-        )
-        url = resp["data"]["invoice_url"]
-        kb.append([InlineKeyboardButton(label, url=url)])
-
-    await update.message.reply_text(
-        texts[lang]["extend"],
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
-
-async def code_user(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args:
-        return
-    uid  = update.effective_user.id
-    days = int(ctx.args[0])
-    exp  = datetime.utcnow() + timedelta(days=days)
-    cur.execute("REPLACE INTO users VALUES (?, ?, ?, 1)",
-                (uid, update.effective_user.username, exp.isoformat()))
-    conn.commit()
-    await update.message.reply_text(f"Extended by {days} days, until {exp.date()}.")
-
 async def auth(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
-        return await update.message.reply_text("Usage: /auth <password>")
+        return await update.message.reply_text(texts["en"]["invalid_sc"])
     pwd = ctx.args[0]
     uid = update.effective_user.id
     if pwd == OWNER_PASSWORD:
         cur.execute("INSERT OR IGNORE INTO owner_sessions(user_id) VALUES(?)", (uid,))
         conn.commit()
-        await update.message.reply_text("Authenticated as owner.")
+        await update.message.reply_text(texts["en"]["auth_ok"])
     else:
-        await update.message.reply_text("Authentication failed.")
+        await update.message.reply_text(texts["en"]["auth_fail"])
 
-async def owner_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def help_owner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not cur.execute("SELECT 1 FROM owner_sessions WHERE user_id=?", (uid,)).fetchone():
+        return await update.message.reply_text("Unauthorized.")
+    help_text = (
+        "/start\n"
+        "/register\n"
+        "/stop\n"
+        "/code <CODE>\n"
+        "/scode <6-digit-code> <days>\n"
+        "/auth <password>\n"
+        "/help\n"
+        "/stats\n"
+        "/broadcast <message>\n"
+        "/records\n"
+    )
+    await update.message.reply_text(help_text)
+
+async def code_use(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        return await update.message.reply_text(texts["en"]["invalid_sc"])
+    uid = update.effective_user.id
+    code = ctx.args[0]
+    lang = user_lang.get(uid, "en")
+    # lookup code
+    row = cur.execute("SELECT days FROM codes WHERE code=?", (code,)).fetchone()
+    if not row:
+        return await update.message.reply_text(texts[lang]["no_codes"])
+    days = row[0]
+    # check usage limit
+    cnt = cur.execute(
+        "SELECT COUNT(*) FROM codes_usage WHERE user_id=? AND code=?", (uid, code)
+    ).fetchone()[0]
+    user_row = cur.execute("SELECT expires_at FROM users WHERE user_id=?", (uid,)).fetchone()
+    now = datetime.utcnow()
+    expires = datetime.fromisoformat(user_row[0]) if user_row else now
+    if expires > now and cnt >= 2:
+        return await update.message.reply_text(texts[lang]["limit_reached"])
+    # extend subscription
+    if expires > now:
+        new_exp = expires + timedelta(days=days)
+    else:
+        new_exp = now + timedelta(days=days)
+    cur.execute("REPLACE INTO users VALUES (?, ?, ?, 1)",
+                (uid, update.effective_user.username, new_exp.isoformat()))
+    cur.execute("INSERT INTO codes_usage VALUES (?, ?, ?)",
+                (uid, code, now.isoformat()))
+    conn.commit()
+    await update.message.reply_text(
+        texts[lang]["used_code"].format(days=days, date=new_exp.date())
+    )
+
+async def scode_define(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not cur.execute("SELECT 1 FROM owner_sessions WHERE user_id=?", (uid,)).fetchone():
+        return await update.message.reply_text("Unauthorized.")
+    if len(ctx.args) != 2 or not re.fullmatch(r"\d{6}", ctx.args[0]) or not ctx.args[1].isdigit():
+        return await update.message.reply_text(texts["en"]["invalid_sc"])
+    code = ctx.args[0]
+    days = int(ctx.args[1])
+    lang = user_lang.get(uid, "en")
+    cur.execute("REPLACE INTO codes VALUES (?, ?)", (code, days))
+    conn.commit()
+    await update.message.reply_text(
+        texts[lang]["code_set"].format(code=code, days=days)
+    )
+
+async def stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not cur.execute("SELECT 1 FROM owner_sessions WHERE user_id=?", (uid,)).fetchone():
         return await update.message.reply_text("Unauthorized.")
@@ -261,12 +277,18 @@ async def owner_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "SELECT COUNT(*) FROM users WHERE is_active=1 AND expires_at>?",
         (datetime.utcnow().isoformat(),)
     ).fetchone()[0]
-    await update.	message.reply_text(f"Users: {total}\nActive: {active}")
+    rows   = cur.execute(
+        "SELECT user_id, username, expires_at, is_active FROM users"
+    ).fetchall()
+    msg = f"Total users: {total}\nActive users: {active}\n\nUser details:\n"
+    for user_id, username, exp, is_active in rows:
+        msg += f"- {username or ''} (ID: {user_id})  Expires: {exp[:10]}  Active: {bool(is_active)}\n"
+    await update.message.reply_text(msg)
 
-async def owner_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not ctx.args:
-        return await update.message.reply_text("Usage: /owner_broadcast <message>")
+        return await update.message.reply_text("Usage: /broadcast <message>")
     if not cur.execute("SELECT 1 FROM owner_sessions WHERE user_id=?", (uid,)).fetchone():
         return await update.message.reply_text("Unauthorized.")
     text = " ".join(ctx.args)
@@ -278,8 +300,30 @@ async def owner_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
     await update.message.reply_text("Broadcast sent.")
 
+async def records(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not cur.execute("SELECT 1 FROM owner_sessions WHERE user_id=?", (uid,)).fetchone():
+        return await update.message.reply_text("Unauthorized.")
+    rows = cur.execute(
+        "SELECT user_id, username, message, timestamp FROM message_logs ORDER BY timestamp DESC"
+    ).fetchall()
+    path = "records.csv"
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["user_id","username","message","timestamp"])
+        writer.writerows(rows)
+    await ctx.application.bot.send_document(chat_id=uid, document=open(path, "rb"))
+
 async def translate_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    txt = update.message.text
+    # log message
+    cur.execute(
+        "INSERT INTO message_logs (user_id, username, message, timestamp) VALUES (?,?,?,?)",
+        (uid, update.effective_user.username or "", txt, datetime.utcnow().isoformat())
+    )
+    conn.commit()
+    # check subscription
     row = cur.execute(
         "SELECT expires_at,is_active FROM users WHERE user_id=?", (uid,)
     ).fetchone()
@@ -290,7 +334,7 @@ async def translate_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         cur.execute("UPDATE users SET is_active=0 WHERE user_id=?", (uid,))
         conn.commit()
         return
-    txt = update.message.text
+    # translate
     src = await detect_language_async(txt)
     targets = {"en","ko","zh","vi","km"} - {src}
     outs = []
@@ -298,6 +342,7 @@ async def translate_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         tr = await translate_text_async(txt, t)
         outs.append(f"{t}: {tr}")
     await update.message.reply_text("\n".join(outs))
+
 
 # ── Flask app and callback endpoint ────────────────────────────────────────────
 app_flask = Flask(__name__)
@@ -321,27 +366,9 @@ def healthz():
 
 @app_flask.route("/callback", methods=["POST"])
 def payment_callback():
-    payload = request.get_json() or {}
-    data    = payload.get("data", {})
-    status  = data.get("status")
-    if status == "paid":
-        meta    = data.get("metadata", {})
-        user_id = meta.get("user_id")
-        days    = meta.get("days", 0)
-        if user_id and days:
-            now = datetime.utcnow()
-            row = cur.execute("SELECT expires_at FROM users WHERE user_id=?", (user_id,)).fetchone()
-            if row and datetime.fromisoformat(row[0]) > now:
-                new_exp = datetime.fromisoformat(row[0]) + timedelta(days=days)
-            else:
-                new_exp = now + timedelta(days=days)
-            cur.execute("REPLACE INTO users VALUES (?, ?, ?, 1)",
-                        (user_id, None, new_exp.isoformat()))
-            conn.commit()
-            lang = user_lang.get(user_id, "en")
-            msg  = texts[lang]["ext_notify"].format(date=new_exp.date())
-            bot.send_message(chat_id=user_id, text=msg)
+    # kept for compatibility if needed
     return "", 200
+
 
 # ── Dispatcher & launch ────────────────────────────────────────────────────────
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -351,11 +378,13 @@ app.add_handler(CallbackQueryHandler(choose_language, pattern=r"^lang_"))
 app.add_handler(CommandHandler("register", register))
 app.add_handler(CommandHandler("stop", stop))
 app.add_handler(CommandHandler("contact", contact))
-app.add_handler(CommandHandler("extend", extend))
-app.add_handler(CommandHandler("code", code_user))
 app.add_handler(CommandHandler("auth", auth))
-app.add_handler(CommandHandler("owner_stats", owner_stats))
-app.add_handler(CommandHandler("owner_broadcast", owner_broadcast))
+app.add_handler(CommandHandler("help", help_owner))
+app.add_handler(CommandHandler("code", code_use))
+app.add_handler(CommandHandler("scode", scode_define))
+app.add_handler(CommandHandler("stats", stats))
+app.add_handler(CommandHandler("broadcast", broadcast))
+app.add_handler(CommandHandler("records", records))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, translate_message))
 
 def main():
