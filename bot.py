@@ -128,38 +128,33 @@ texts = {
         "stat_hdr":    "{uid}/{uname} 채팅 기록 (최근 {n}개):",
         "stat_row":    "{ts} | {msg}"
     },
-    # "zh","vi","km" similarly...
+    # "zh","vi","km" 동일하게 추가 가능
 }
 
 # ── Helpers ─────────────────────────────────────────────────────────────────────
 def detect_language(text: str) -> str:
-    r = requests.post(f"https://translation.googleapis.com/language/translate/v2/detect",
+    r = requests.post("https://translation.googleapis.com/language/translate/v2/detect",
                       params={"key": GOOGLE_API_KEY}, data={"q": text})
     r.raise_for_status()
     return r.json()["data"]["detections"][0][0]["language"]
 
 def translate_text(text: str, target: str) -> str:
-    r = requests.post(f"https://translation.googleapis.com/language/translate/v2",
+    r = requests.post("https://translation.googleapis.com/language/translate/v2",
                       params={"key": GOOGLE_API_KEY},
                       json={"q": text, "target": target, "format": "text"})
     r.raise_for_status()
     return r.json()["data"]["translations"][0]["translatedText"]
 
 async def detect_language_async(text: str) -> str:
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, detect_language, text)
+    return await asyncio.get_event_loop().run_in_executor(None, detect_language, text)
 
 async def translate_text_async(text: str, target: str) -> str:
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, translate_text, text, target)
+    return await asyncio.get_event_loop().run_in_executor(None, translate_text, text, target)
 
 def create_invoice(data: dict) -> dict:
-    url = "https://api.oxapay.com/v1/payment/invoice"
-    headers = {
-        "merchant_api_key": OXAPAY_API_KEY,
-        "Content-Type":     "application/json"
-    }
-    r = requests.post(url, json=data, headers=headers)
+    r = requests.post("https://api.oxapay.com/v1/payment/invoice",
+                      json=data,
+                      headers={"merchant_api_key": OXAPAY_API_KEY, "Content-Type":"application/json"})
     r.raise_for_status()
     return r.json()
 
@@ -172,28 +167,24 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("Tiếng Việt", callback_data="lang_vi")],
         [InlineKeyboardButton("ភាសាខ្មែរ", callback_data="lang_km")],
     ]
-    await update.message.reply_text(
-        texts["en"]["choose"],
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
+    await update.message.reply_text(texts["en"]["choose"], reply_markup=InlineKeyboardMarkup(kb))
 
 async def choose_language(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    qry = update.callback_query
+    qry  = update.callback_query
     lang = qry.data.split("_",1)[1]
     user_lang[qry.from_user.id] = lang
     await qry.answer()
-    await qry.edit_message_text(texts[lang]["help_owner"] if qry.data=="lang_en" else texts[lang]["choose"])
+    # 언어 선택 후 일반 사용자에게는 등록 안내 바로 띄우도록 texts[lang]["registered"] 사용해도 되고, 
+    # 예제대로 owner_help 대신 일반 도움말로 바꾸려면 별도 texts[lang]["help_user"] 추가 필요
+    await qry.edit_message_text(texts[lang]["help_owner"])
 
 async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lang = user_lang.get(update.effective_user.id, "en")
     uid  = update.effective_user.id
     exp  = datetime.utcnow() + timedelta(days=7)
-    cur.execute("REPLACE INTO users VALUES (?,?,?,1)",
-                (uid, update.effective_user.username, exp.isoformat()))
+    cur.execute("REPLACE INTO users VALUES (?,?,?,1)", (uid, update.effective_user.username, exp.isoformat()))
     conn.commit()
-    await update.message.reply_text(
-        texts[lang]["registered"].format(date=exp.date())
-    )
+    await update.message.reply_text(texts[lang]["registered"].format(date=exp.date()))
 
 async def stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lang = user_lang.get(update.effective_user.id, "en")
@@ -203,13 +194,13 @@ async def stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(texts[lang]["stopped"])
 
 async def contact(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    lang    = user_lang.get(update.effective_user.id, "en")
-    uid     = update.effective_user.id
-    uname   = update.effective_user.username or ""
-    dbid    = cur.execute("SELECT rowid FROM users WHERE user_id=?", (uid,)).fetchone()
-    dbid    = dbid[0] if dbid else ""
-    msg     = " ".join(ctx.args) if ctx.args else ""
-    txt     = texts[lang]["contact_txt"].format(uid=uid, uname=uname, dbid=dbid, msg=msg)
+    lang  = user_lang.get(update.effective_user.id, "en")
+    uid   = update.effective_user.id
+    uname = update.effective_user.username or ""
+    row   = cur.execute("SELECT rowid FROM users WHERE user_id=?", (uid,)).fetchone()
+    dbid  = row[0] if row else ""
+    msg   = " ".join(ctx.args) if ctx.args else ""
+    txt   = texts[lang]["contact_txt"].format(uid=uid, uname=uname, dbid=dbid, msg=msg)
     for (oid,) in cur.execute("SELECT user_id FROM owner_sessions").fetchall():
         await ctx.application.bot.send_message(chat_id=oid, text=txt)
     await update.message.reply_text(texts[lang]["contact_ok"])
@@ -218,22 +209,21 @@ async def code_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     lang = user_lang.get(uid, "en")
     args = ctx.args
-    # Owner: create code
+    # Owner mode: create code
     if cur.execute("SELECT 1 FROM owner_sessions WHERE user_id=?", (uid,)).fetchone():
         if len(args) != 2:
             return await update.message.reply_text("Usage: /code <6-digit code> <days>")
         code, days = args[0], int(args[1])
         cur.execute("REPLACE INTO codes VALUES (?,?)", (code, days))
         conn.commit()
-        return await update.message.reply_text(f"Code {code} => {days} days created.")
-    # User: redeem code
+        return await update.message.reply_text(f"Code {code} → {days} days created.")
+    # User mode: redeem code
     if len(args) != 2:
         return await update.message.reply_text("Usage: /code <code> <days>")
     code, days = args[0], int(args[1])
     row = cur.execute("SELECT days FROM codes WHERE code=?", (code,)).fetchone()
     if not row or row[0] != days:
         return await update.message.reply_text(texts[lang]["code_fail"])
-    # extend subscription
     now = datetime.utcnow()
     ur  = cur.execute("SELECT expires_at FROM users WHERE user_id=?", (uid,)).fetchone()
     if ur and datetime.fromisoformat(ur[0]) > now:
@@ -243,39 +233,35 @@ async def code_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cur.execute("REPLACE INTO users VALUES (?,?,?,1)",
                 (uid, update.effective_user.username, new_exp.isoformat()))
     conn.commit()
-    await update.message.reply_text(
-        texts[lang]["code_success"].format(date=new_exp.date())
-    )
+    await update.message.reply_text(texts[lang]["code_success"].format(date=new_exp.date()))
 
 async def extend(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lang   = user_lang.get(update.effective_user.id, "en")
     uid    = update.effective_user.id
     now_ts = int(time.time())
     kb     = []
-    for days,label in ((30, texts[lang]["m1"]), (365, texts[lang]["y1"])):
+    for days, label in ((30, texts[lang]["m1"]), (365, texts[lang]["y1"])):
         data = {
-            "amount":              100,
-            "currency":            "USD",
-            "lifetime":            30,
-            "fee_paid_by_payer":   1,
-            "under_paid_coverage": 2.5,
-            "to_currency":         "USDT",
-            "auto_withdrawal":     False,
-            "mixed_payment":       True,
-            "callback_url":        CALLBACK_URL,
-            "return_url":          RETURN_URL,
-            "email":               update.effective_user.username or "",
-            "order_id":            f"{uid}-{now_ts}-{days}",
-            "metadata":            {"user_id": uid, "days": days},
-            "thanks_message":      "Thank you!",
-            "description":         f"Subscription {days}-day extension",
-            "sandbox":             False
+            "amount":            100,
+            "currency":          "USD",
+            "lifetime":          30,
+            "fee_paid_by_payer": 1,
+            "under_paid_coverage":2.5,
+            "to_currency":       "USDT",
+            "auto_withdrawal":   False,
+            "mixed_payment":     True,
+            "callback_url":      CALLBACK_URL,
+            "return_url":        RETURN_URL,
+            "email":             update.effective_user.username or "",
+            "order_id":          f"{uid}-{now_ts}-{days}",
+            "metadata":          {"user_id": uid, "days": days},
+            "thanks_message":    "Thank you!",
+            "description":       f"Subscription {days}-day extension",
+            "sandbox":           False
         }
         resp = await asyncio.get_event_loop().run_in_executor(None, create_invoice, data)
-        url  = resp["data"]["invoice_url"]
-        kb.append([InlineKeyboardButton(label, url=url)])
-    await update.message.reply_text(texts[lang]["extend"],
-                                    reply_markup=InlineKeyboardMarkup(kb))
+        kb.append([InlineKeyboardButton(label, url=resp["data"]["invoice_url"])])
+    await update.message.reply_text(texts[lang]["extend"], reply_markup=InlineKeyboardMarkup(kb))
 
 async def auth(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
@@ -285,9 +271,9 @@ async def auth(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if args[0] == OWNER_PASSWORD:
         cur.execute("INSERT OR IGNORE INTO owner_sessions VALUES(?)", (uid,))
         conn.commit()
-        await update.message.reply_text(texts[user_lang.get(uid,"en")]["auth_ok"])
+        await update.message.reply_text(texts[user_lang.get(uid, "en")]["auth_ok"])
     else:
-        await update.message.reply_text(texts[user_lang.get(uid,"en")]["auth_fail"])
+        await update.message.reply_text(texts[user_lang.get(uid, "en")]["auth_fail"])
 
 async def owner_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -309,8 +295,7 @@ async def stats_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = texts[lang]["stats_hdr"].format(total=total, active=active)
     for row in cur.execute("SELECT user_id,username,expires_at,is_active FROM users"):
         msg += "\n" + texts[lang]["stats_row"].format(
-            uid=row[0], uname=row[1] or "",
-            exp=row[2].split("T")[0], act=row[3]
+            uid=row[0], uname=row[1] or "", exp=row[2].split("T")[0], act=row[3]
         )
     await update.message.reply_text(msg)
 
@@ -354,13 +339,16 @@ async def stat_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         header = texts[lang]["stat_hdr"].format(uid=u, uname=uname, n=len(calls))
         await update.message.reply_text(header)
         for msg, ts in calls:
-            line = texts[lang]["stat_row"].format(ts=ts.split("T")[0]+" "+ts.split("T")[1].split(".")[0], msg=msg)
+            line = texts[lang]["stat_row"].format(
+                ts=ts.split("T")[0] + " " + ts.split("T")[1].split(".")[0],
+                msg=msg
+            )
             await update.message.reply_text(line)
 
 async def translate_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    row=cur.execute("SELECT expires_at,is_active FROM users WHERE user_id=?", (uid,)).fetchone()
-    if not row or row[1]==0:
+    row = cur.execute("SELECT expires_at,is_active FROM users WHERE user_id=?", (uid,)).fetchone()
+    if not row or row[1] == 0:
         return
     exp = datetime.fromisoformat(row[0])
     if exp < datetime.utcnow():
@@ -387,24 +375,24 @@ bot       = Bot(token=TELEGRAM_TOKEN)
 def payment_callback():
     payload = request.get_json() or {}
     data    = payload.get("data", {})
-    if data.get("status")=="paid":
-        meta    = data.get("metadata",{})
+    if data.get("status") == "paid":
+        meta    = data.get("metadata", {})
         uid     = meta.get("user_id")
-        days    = meta.get("days",0)
+        days    = meta.get("days", 0)
         if uid and days:
-            now   = datetime.utcnow()
-            ur    = cur.execute("SELECT expires_at FROM users WHERE user_id=?", (uid,)).fetchone()
-            if ur and datetime.fromisoformat(ur[0])>now:
+            now = datetime.utcnow()
+            ur  = cur.execute("SELECT expires_at FROM users WHERE user_id=?", (uid,)).fetchone()
+            if ur and datetime.fromisoformat(ur[0]) > now:
                 newe = datetime.fromisoformat(ur[0]) + timedelta(days=days)
             else:
                 newe = now + timedelta(days=days)
             cur.execute("REPLACE INTO users VALUES (?,?,?,1)",
                         (uid, None, newe.isoformat()))
             conn.commit()
-            lang = user_lang.get(uid,"en")
+            lang = user_lang.get(uid, "en")
             bot.send_message(chat_id=uid,
                              text=texts[lang]["code_success"].format(date=newe.date()))
-    return "",200
+    return "", 200
 
 # ── Dispatcher & launch ────────────────────────────────────────────────────────
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
