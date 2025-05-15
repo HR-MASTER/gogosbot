@@ -30,12 +30,15 @@ TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN")
 OXAPAY_API_KEY  = os.getenv("OXAPAY_API_KEY")   # Invoice API Key
 OWNER_PASSWORD  = os.getenv("OWNER_PASSWORD")
 GOOGLE_API_KEY  = os.getenv("GOOGLE_API_KEY")
-CALLBACK_URL    = os.getenv("CALLBACK_URL")
-RETURN_URL      = os.getenv("RETURN_URL")
 
-for var in ["TELEGRAM_TOKEN", "OXAPAY_API_KEY", "OWNER_PASSWORD", "GOOGLE_API_KEY", "CALLBACK_URL", "RETURN_URL"]:
-    if not globals().get(var):
-        raise RuntimeError(f"{var} is not set")
+if not TELEGRAM_TOKEN:
+    raise RuntimeError("TELEGRAM_TOKEN is not set")
+if not OXAPAY_API_KEY:
+    raise RuntimeError("OXAPAY_API_KEY is not set")
+if not OWNER_PASSWORD:
+    raise RuntimeError("OWNER_PASSWORD is not set")
+if not GOOGLE_API_KEY:
+    raise RuntimeError("GOOGLE_API_KEY is not set")
 
 TRANSLATE_URL = "https://translation.googleapis.com/language/translate/v2"
 
@@ -44,10 +47,10 @@ texts = {
     "en": {
         "choose":         "Please select your language:",
         "help":           "Available commands:\n"
-                           "/register – Activate translation (7 days)\n"
-                           "/stop     – Deactivate translation\n"
-                           "/extend   – Extend subscription\n"
-                           "/contact  – Contact owner\n",
+                          "/register – Activate translation (7 days)\n"
+                          "/stop     – Deactivate translation\n"
+                          "/extend   – Extend subscription\n"
+                          "/contact  – Contact owner\n",
         "registered":     "Registered until {date}",
         "stopped":        "Translation stopped.",
         "extend":         "Choose extension option:",
@@ -61,10 +64,10 @@ texts = {
     "ko": {
         "choose":         "언어를 선택하세요:",
         "help":           "사용 가능한 명령어:\n"
-                           "/register – 번역 활성화 (7일)\n"
-                           "/stop     – 번역 중단\n"
-                           "/extend   – 구독 연장\n"
-                           "/contact  – 소유자에게 문의\n",
+                          "/register – 번역 활성화 (7일)\n"
+                          "/stop     – 번역 중단\n"
+                          "/extend   – 구독 연장\n"
+                          "/contact  – 소유자에게 문의\n",
         "registered":     "등록 완료: {date}까지",
         "stopped":        "번역 기능 중단됨",
         "extend":         "연장 옵션을 선택하세요:",
@@ -75,7 +78,7 @@ texts = {
         "ext_fail":       "인보이스 생성 실패: {error}",
         "ext_notify":     "구독이 {date}까지 연장되었습니다.",
     },
-    # zh, vi, km 동일 패턴으로 추가 필요
+    # Add "zh", "vi", "km" similarly if needed
 }
 
 # ── Database setup ─────────────────────────────────────────────────────────────
@@ -135,7 +138,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     kb = [
         [InlineKeyboardButton("English", callback_data="lang_en"),
          InlineKeyboardButton("한국어", callback_data="lang_ko")],
-        [InlineKeyboardButton("中文", callback_data="lang_zh"),
+        [InlineKeyboardButton("中文",    callback_data="lang_zh"),
          InlineKeyboardButton("Tiếng Việt", callback_data="lang_vi")],
         [InlineKeyboardButton("ភាសាខ្មែរ", callback_data="lang_km")],
     ]
@@ -156,7 +159,7 @@ async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     exp  = datetime.utcnow() + timedelta(days=7)
     cur.execute("REPLACE INTO users VALUES (?, ?, ?, 1)",
-                (uid, update.effective_user.username, exp.isoformat(),))
+                (uid, update.effective_user.username, exp.isoformat()))
     conn.commit()
     await update.message.reply_text(
         texts[lang]["registered"].format(date=exp.date())
@@ -170,22 +173,22 @@ async def stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(texts[lang]["stopped"])
 
 async def contact(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.split(" ",1)[1] if " " in update.message.text else ""
+    text = " ".join(ctx.args) if ctx.args else ""
     rows = cur.execute("SELECT user_id FROM owner_sessions").fetchall()
     for (owner_id,) in rows:
-        await ctx.application.bot.send_message(chat_id=owner_id,
-            text=f"[Contact]
-From {update.effective_user.id}:\n{text}"
+        await ctx.application.bot.send_message(
+            chat_id=owner_id,
+            text=f"[Contact]\nFrom {update.effective_user.id}:\n{text}"
         )
     lang = user_lang.get(update.effective_user.id, "en")
-    await update.message.reply_text(
-        {"en": "Your message has been sent to the owner.",
-         "ko": "소유자에게 메시지가 전달되었습니다."}[lang]
-    )
+    await update.message.reply_text({
+        "en": "Your message has been sent to the owner.",
+        "ko": "메시지가 소유자에게 전달되었습니다."
+    }[lang])
 
 async def extend(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    lang = user_lang.get(update.effective_user.id, "en")
-    uid  = update.effective_user.id
+    lang   = user_lang.get(update.effective_user.id, "en")
+    uid    = update.effective_user.id
     now_ts = int(time.time())
 
     options = [
@@ -203,8 +206,8 @@ async def extend(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "to_currency":         "USDT",
             "auto_withdrawal":     False,
             "mixed_payment":       True,
-            "callback_url":        CALLBACK_URL,
-            "return_url":          RETURN_URL,
+            "callback_url":        os.getenv("CALLBACK_URL"),
+            "return_url":          os.getenv("RETURN_URL"),
             "email":               update.effective_user.username or "",
             "order_id":            f"{uid}-{now_ts}-{days}",
             "metadata": {
@@ -255,12 +258,10 @@ async def owner_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Unauthorized.")
     total  = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
     active = cur.execute(
-        "SELECT COUNT(*) FROM users WHERE is_active=1 AND expires_at>?", 
+        "SELECT COUNT(*) FROM users WHERE is_active=1 AND expires_at>?",
         (datetime.utcnow().isoformat(),)
     ).fetchone()[0]
-    await update.message.reply_text(
-        f"Users: {total}\nActive: {active}"
-    )
+    await update.	message.reply_text(f"Users: {total}\nActive: {active}")
 
 async def owner_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -300,18 +301,18 @@ async def translate_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ── Flask app and callback endpoint ────────────────────────────────────────────
 app_flask = Flask(__name__)
-bot = Bot(token=TELEGRAM_TOKEN)
+bot       = Bot(token=TELEGRAM_TOKEN)
 
 @app_flask.route("/")
 def dashboard():
     total  = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
     active = cur.execute(
-        "SELECT COUNT(*) FROM users WHERE is_active=1 AND expires_at>?", 
+        "SELECT COUNT(*) FROM users WHERE is_active=1 AND expires_at>?",
         (datetime.utcnow().isoformat(),)
     ).fetchone()[0]
     return render_template_string("""
     <h1>Bot Dashboard</h1>
-    <ul><li>Total users: {{total}}</li><li>Active users: {{active}}</li></ul>
+    <ul><li>Total users: {{total}}</li><li>Active: {{active}}</li></ul>
     """, total=total, active=active)
 
 @app_flask.route("/healthz")
@@ -321,10 +322,10 @@ def healthz():
 @app_flask.route("/callback", methods=["POST"])
 def payment_callback():
     payload = request.get_json() or {}
-    data = payload.get("data", {})
-    status = data.get("status")
+    data    = payload.get("data", {})
+    status  = data.get("status")
     if status == "paid":
-        meta = data.get("metadata", {})
+        meta    = data.get("metadata", {})
         user_id = meta.get("user_id")
         days    = meta.get("days", 0)
         if user_id and days:
@@ -338,7 +339,7 @@ def payment_callback():
                         (user_id, None, new_exp.isoformat()))
             conn.commit()
             lang = user_lang.get(user_id, "en")
-            msg = texts[lang]["ext_notify"].format(date=new_exp.date())
+            msg  = texts[lang]["ext_notify"].format(date=new_exp.date())
             bot.send_message(chat_id=user_id, text=msg)
     return "", 200
 
@@ -359,7 +360,7 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, translate_messag
 
 def main():
     threading.Thread(
-        target=lambda: app_flask.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+        target=lambda: app_flask.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
     ).start()
     app.run_polling()
 
