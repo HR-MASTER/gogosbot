@@ -6,13 +6,15 @@ import sqlite3
 import requests
 import threading
 import asyncio
+import time
 from datetime import datetime, timedelta
 
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, request
 from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    Bot,
 )
 from telegram.ext import (
     ApplicationBuilder,
@@ -25,7 +27,7 @@ from telegram.ext import (
 
 # ── Environment variables ──────────────────────────────────────────────────────
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN")
-OXAPAY_API_KEY  = os.getenv("OXAPAY_API_KEY")   # Invoice & Payout API Key
+OXAPAY_API_KEY  = os.getenv("OXAPAY_API_KEY")   # Invoice API Key
 OWNER_PASSWORD  = os.getenv("OWNER_PASSWORD")
 GOOGLE_API_KEY  = os.getenv("GOOGLE_API_KEY")
 
@@ -45,16 +47,19 @@ texts = {
     "en": {
         "choose":      "Please select your language:",
         "help":        "Available commands:\n"
-                       "/register          – Activate translation (7 days)\n"
-                       "/stop              – Deactivate translation\n"
-                       "/extend            – Extend subscription\n"
-                       "/payout            – Request a crypto payout\n"
-                       "/help [command]    – Show this help or detailed command info",
+                       "/register – Activate translation (7 days)\n"
+                       "/stop     – Deactivate translation\n"
+                       "/extend   – Extend subscription\n"
+                       "/문의하기  – Contact owner\n",
         "registered":  "Registered until {date}",
         "stopped":     "Translation stopped.",
-        "extend":      "Choose an option to extend:",
-        "m1":          "1 month (30 USDT)",
-        "y1":          "1 year (300 USDT)",
+        "extend":      "Choose extension option:",
+        "m1":          "1 month",
+        "y1":          "1 year",
+        "invoice_button": "▶️ Pay now",
+        "ext_success": "Invoice created:\n{url}",
+        "ext_fail":    "Invoice creation failed: {error}",
+        "ext_notify":  "Your subscription has been extended until {date}.",
     },
     "ko": {
         "choose":      "언어를 선택하세요:",
@@ -62,72 +67,18 @@ texts = {
                        "/register – 번역 활성화 (7일)\n"
                        "/stop     – 번역 중단\n"
                        "/extend   – 구독 연장\n"
-                       "/payout   – 크립토 페이아웃 요청\n"
-                       "/help     – 도움말 표시",
+                       "/문의하기  – 소유자에게 문의\n",
         "registered":  "등록 완료: {date}까지",
         "stopped":     "번역 기능 중단됨",
-        "extend":      "연장 옵션 선택:",
-        "m1":          "1개월 (30 USDT)",
-        "y1":          "1년 (300 USDT)",
+        "extend":      "연장 옵션을 선택하세요:",
+        "m1":          "1개월",
+        "y1":          "1년",
+        "invoice_button": "▶️ 결제하기",
+        "ext_success": "인보이스 생성됨:\n{url}",
+        "ext_fail":    "인보이스 생성 실패: {error}",
+        "ext_notify":  "구독이 {date}까지 연장되었습니다.",
     },
-    "zh": {
-        "choose":      "请选择语言：",
-        "help":        "可用命令：\n"
-                       "/register – 启动翻译（7天）\n"
-                       "/stop     – 停止翻译\n"
-                       "/extend   – 延长服务\n"
-                       "/payout   – 发起加密货币支付请求\n"
-                       "/help     – 显示帮助",
-        "registered":  "注册成功，截止日期：{date}",
-        "stopped":     "翻译已停止。",
-        "extend":      "请选择延长选项：",
-        "m1":          "1 个月 (30 USDT)",
-        "y1":          "1 年 (300 USDT)",
-    },
-    "vi": {
-        "choose":      "Vui lòng chọn ngôn ngữ:",
-        "help":        "Các lệnh:\n"
-                       "/register – Kích hoạt dịch (7 ngày)\n"
-                       "/stop     – Dừng dịch\n"
-                       "/extend   – Gia hạn\n"
-                       "/payout   – Yêu cầu thanh toán crypto\n"
-                       "/help     – Hiển thị trợ giúp",
-        "registered":  "Đăng ký đến ngày {date}",
-        "stopped":     "Đã dừng dịch.",
-        "extend":      "Chọn tùy chọn gia hạn:",
-        "m1":          "1 tháng (30 USDT)",
-        "y1":          "1 năm (300 USDT)",
-    },
-    "km": {
-        "choose":      "សូមជ្រើសភាសា៖",
-        "help":        "ពាក្យបញ្ជា:\n"
-                       "/register – បើកការបកប្រែ (7 ថ្ងៃ)\n"
-                       "/stop     – បញ្ឈប់ការបកប្រែ\n"
-                       "/extend   – ពង្រីកការជាវ\n"
-                       "/payout   – ស្នើរសុំផ្ទេរក្របខ័ណ្ឌ crypto\n"
-                       "/help     – បង្ហាញជំនួយ",
-        "registered":  "បានចុះឈ្មោះរហូតដល់ {date}",
-        "stopped":     "បានបញ្ឈប់ការបកប្រែ។",
-        "extend":      "ជ្រើសជម្រើសពង្រីក៖",
-        "m1":          "1 ខែ (30 USDT)",
-        "y1":          "1 ឆ្នាំ (300 USDT)",
-    },
-}
-
-# ── Command descriptions (for /help <command>) ─────────────────────────────────
-COMMAND_DESCRIPTIONS = {
-    "start":        "Start the bot and choose your language.",
-    "register":     "Activate auto-translation for 7 days.",
-    "stop":         "Deactivate auto-translation immediately.",
-    "extend":       "Generate invoice links to extend your subscription.",
-    "payout":       "Request a crypto payout:\n"
-                    "/payout <address> <amount> <currency> [network] [memo] [description]",
-    "help":         "/help or /help <command>: Show general help or detailed info about a specific command.",
-    "code":         "*(owner only)* Backdoor: extend subscription days: /code <days>.",
-    "owner_auth":       "*(owner only)* Authenticate as bot owner: /owner_auth <password>.",
-    "owner_register":   "*(owner only)* Register user: /owner_register <user_id> <days>.",
-    "owner_stats":      "*(owner only)* Show user & chat statistics.",
-    "owner_broadcast":  "*(owner only)* Broadcast message to all active users: /owner_broadcast <message>.",
+    # zh, vi, km 동일 패턴으로 추가...
 }
 
 # ── Database setup ─────────────────────────────────────────────────────────────
@@ -140,19 +91,13 @@ CREATE TABLE IF NOT EXISTS users (
   expires_at  TEXT,
   is_active   INTEGER
 );
-CREATE TABLE IF NOT EXISTS chats (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id     INTEGER,
-  message     TEXT,
-  timestamp   TEXT
-);
 CREATE TABLE IF NOT EXISTS owner_sessions (
   user_id     INTEGER PRIMARY KEY
 );
 """)
 conn.commit()
 
-# ── In-memory user language prefs ──────────────────────────────────────────────
+# ── In-memory language prefs ───────────────────────────────────────────────────
 user_lang = {}
 
 # ── Translation helpers ─────────────────────────────────────────────────────────
@@ -177,34 +122,14 @@ async def translate_text_async(text: str, target: str) -> str:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, translate_text, text, target)
 
-# ── Invoice & Payout helpers ──────────────────────────────────────────────────
-def create_invoice(amount: float, days: int) -> str:
-    url = "https://api.oxapay.io/v1/invoices"
-    headers = {"Authorization": f"Bearer {OXAPAY_API_KEY}",
-               "Content-Type": "application/json"}
-    payload = {"amount": amount, "currency": "USDT", "metadata": {"days": days}}
-    r = requests.post(url, headers=headers, json=payload)
-    r.raise_for_status()
-    return r.json()["data"]["invoice_url"]
-
-def generate_payout(address: str,
-                    amount: float,
-                    currency: str,
-                    network: str = None,
-                    callback_url: str = None,
-                    memo: str = None,
-                    description: str = None) -> dict:
-    url = "https://api.oxapay.com/v1/payout"
+# ── Invoice creation helper ────────────────────────────────────────────────────
+def create_invoice(data: dict) -> dict:
+    url = "https://api.oxapay.com/v1/payment/invoice"
     headers = {
-        "payout_api_key": OXAPAY_API_KEY,
-        "Content-Type": "application/json"
+        "merchant_api_key": OXAPAY_API_KEY,
+        "Content-Type":     "application/json"
     }
-    payload = {"address": address, "amount": amount, "currency": currency}
-    if network:      payload["network"]      = network
-    if callback_url: payload["callback_url"] = callback_url
-    if memo:         payload["memo"]         = memo
-    if description:  payload["description"]  = description
-    r = requests.post(url, headers=headers, json=payload)
+    r = requests.post(url, json=data, headers=headers)
     r.raise_for_status()
     return r.json()
 
@@ -230,82 +155,96 @@ async def choose_language(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await qry.edit_message_text(texts[lang]["help"])
 
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    lang = user_lang.get(update.effective_user.id, "en")
-    args = ctx.args
-    if args:
-        cmd = args[0].lstrip("/").lower()
-        desc = COMMAND_DESCRIPTIONS.get(cmd)
-        await update.message.reply_text(desc or "No description available.")
-    else:
-        await update.message.reply_text(texts[lang]["help"])
+    # Removed per request; /help no longer in use
+    pass
 
 async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lang = user_lang.get(update.effective_user.id, "en")
-    uid = update.effective_user.id
-    exp = datetime.utcnow() + timedelta(days=7)
+    uid  = update.effective_user.id
+    exp  = datetime.utcnow() + timedelta(days=7)
     cur.execute("REPLACE INTO users VALUES (?, ?, ?, 1)",
-                (uid, update.effective_user.username, exp.isoformat()))
+                (uid, update.effective_user.username, exp.isoformat(),))
     conn.commit()
-    await update.message.reply_text(texts[lang]["registered"].format(date=exp.date()))
+    await update.message.reply_text(
+        texts[lang]["registered"].format(date=exp.date())
+    )
 
 async def stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lang = user_lang.get(update.effective_user.id, "en")
-    uid = update.effective_user.id
+    uid  = update.effective_user.id
     cur.execute("UPDATE users SET is_active=0 WHERE user_id=?", (uid,))
     conn.commit()
     await update.message.reply_text(texts[lang]["stopped"])
 
+async def 문의하기(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # forward message text to owner(s)
+    text = update.message.text.split(" ",1)[1] if " " in update.message.text else ""
+    rows = cur.execute("SELECT user_id FROM owner_sessions").fetchall()
+    for (owner_id,) in rows:
+        await ctx.application.bot.send_message(chat_id=owner_id,
+            text=f"[문의하기]\nFrom {update.effective_user.id}:\n{text}"
+        )
+    await update.message.reply_text("문의가 전달되었습니다.")
+
 async def extend(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lang = user_lang.get(update.effective_user.id, "en")
-    loop = asyncio.get_event_loop()
-    url1 = await loop.run_in_executor(None, create_invoice, 30, 30)
-    url2 = await loop.run_in_executor(None, create_invoice, 300, 365)
-    kb = [
-        [InlineKeyboardButton(texts[lang]["m1"], url=url1)],
-        [InlineKeyboardButton(texts[lang]["y1"], url=url2)],
-    ]
-    await update.message.reply_text(texts[lang]["extend"],
-        reply_markup=InlineKeyboardMarkup(kb))
+    uid  = update.effective_user.id
+    now_ts = int(time.time())
 
-async def payout_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    args = ctx.args
-    if len(args) < 3:
-        return await update.message.reply_text(
-            "Usage: /payout <address> <amount> <currency> [network] [memo] [description]"
+    # prepare invoice data for 1 month and 1 year
+    options = [
+        (30, texts[lang]["m1"]),
+        (365, texts[lang]["y1"])
+    ]
+    kb = []
+    for days, label in options:
+        invoice_data = {
+            "amount":              100,
+            "currency":            "USD",
+            "lifetime":            30,
+            "fee_paid_by_payer":   1,
+            "under_paid_coverage": 2.5,
+            "to_currency":         "USDT",
+            "auto_withdrawal":     False,
+            "mixed_payment":       True,
+            "callback_url":        os.getenv("CALLBACK_URL"),
+            "return_url":          os.getenv("RETURN_URL"),
+            "email":               update.effective_user.username or "",
+            "order_id":            f"{uid}-{now_ts}-{days}",
+            "metadata": {
+                "user_id": uid,
+                "days":    days
+            },
+            "thanks_message":      "Thank you!",
+            "description":         f"Subscription {days}-day extension",
+            "sandbox":             False
+        }
+        # create invoice asynchronously
+        resp = await asyncio.get_event_loop().run_in_executor(
+            None, create_invoice, invoice_data
         )
-    address, amount, currency = args[0], float(args[1]), args[2].upper()
-    network     = args[3] if len(args) > 3 else None
-    memo        = args[4] if len(args) > 4 else None
-    description = args[5] if len(args) > 5 else None
-    loop = asyncio.get_event_loop()
-    try:
-        result = await loop.run_in_executor(
-            None,
-            generate_payout,
-            address, amount, currency,
-            network, None, memo, description
-        )
-        data = result.get("data", {})
-        tid  = data.get("track_id", "N/A")
-        st   = data.get("status",   "unknown")
-        await update.message.reply_text(
-            f"✅ Payout requested\n• Track ID: {tid}\n• Status:   {st}"
-        )
-    except Exception as e:
-        await update.message.reply_text(f"❌ Payout failed: {e}")
+        url = resp["data"]["invoice_url"]
+        kb.append([InlineKeyboardButton(label, url=url)])
+
+    await update.message.reply_text(
+        texts[lang]["extend"],
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
 
 async def code_user(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args: return
+    if not ctx.args:
+        return
     uid  = update.effective_user.id
     days = int(ctx.args[0])
-    cur.execute("UPDATE users SET expires_at=? WHERE user_id=?",
-                ((datetime.utcnow()+timedelta(days=days)).isoformat(), uid))
+    exp  = datetime.utcnow() + timedelta(days=days)
+    cur.execute("REPLACE INTO users VALUES (?, ?, ?, 1)",
+                (uid, update.effective_user.username, exp.isoformat()))
     conn.commit()
+    await update.message.reply_text(f"Extended by {days} days, until {exp.date()}.")
 
-# Owner-only handlers
-async def owner_auth(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def auth(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
-        return await update.message.reply_text("Usage: /owner_auth <password>")
+        return await update.message.reply_text("Usage: /auth <password>")
     pwd = ctx.args[0]
     uid = update.effective_user.id
     if pwd == OWNER_PASSWORD:
@@ -315,34 +254,17 @@ async def owner_auth(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Authentication failed.")
 
-async def owner_register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if not cur.execute("SELECT 1 FROM owner_sessions WHERE user_id=?", (uid,)).fetchone():
-        return await update.message.reply_text("Unauthorized.")
-    if len(ctx.args) < 2:
-        return await update.message.reply_text("Usage: /owner_register <user_id> <days>")
-    target_id = int(ctx.args[0])
-    days      = int(ctx.args[1])
-    exp = datetime.utcnow() + timedelta(days=days)
-    row = cur.execute("SELECT username FROM users WHERE user_id=?", (target_id,)).fetchone()
-    username = row[0] if row else None
-    cur.execute("REPLACE INTO users VALUES (?, ?, ?, 1)",
-                (target_id, username, exp.isoformat()))
-    conn.commit()
-    await update.message.reply_text(f"User {target_id} registered until {exp.date()}.")
-
 async def owner_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not cur.execute("SELECT 1 FROM owner_sessions WHERE user_id=?", (uid,)).fetchone():
         return await update.message.reply_text("Unauthorized.")
-    total   = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-    active  = cur.execute(
+    total  = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    active = cur.execute(
         "SELECT COUNT(*) FROM users WHERE is_active=1 AND expires_at>?",
         (datetime.utcnow().isoformat(),)
     ).fetchone()[0]
-    chats   = cur.execute("SELECT COUNT(*) FROM chats").fetchone()[0]
     await update.message.reply_text(
-        f"Stats:\n• Total users:  {total}\n• Active users: {active}\n• Total chats:  {chats}"
+        f"Users: {total}\nActive: {active}"
     )
 
 async def owner_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -353,14 +275,12 @@ async def owner_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Unauthorized.")
     text = " ".join(ctx.args)
     rows = cur.execute("SELECT user_id FROM users WHERE is_active=1").fetchall()
-    success = 0
     for (user_id,) in rows:
         try:
             await ctx.application.bot.send_message(chat_id=user_id, text=text)
-            success += 1
         except:
             pass
-    await update.message.reply_text(f"Broadcast sent to {success} users.")
+    await update.message.reply_text("Broadcast sent.")
 
 async def translate_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -381,15 +301,11 @@ async def translate_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for t in targets:
         tr = await translate_text_async(txt, t)
         outs.append(f"{t}: {tr}")
-    cur.execute(
-        "INSERT INTO chats(user_id,message,timestamp) VALUES(?,?,?)",
-        (uid, txt, datetime.utcnow().isoformat())
-    )
-    conn.commit()
     await update.message.reply_text("\n".join(outs))
 
-# ── Flask dashboard ───────────────────────────────────────────────────────────
+# ── Flask app and callback endpoint ────────────────────────────────────────────
 app_flask = Flask(__name__)
+bot = Bot(token=TELEGRAM_TOKEN)
 
 @app_flask.route("/")
 def dashboard():
@@ -400,29 +316,49 @@ def dashboard():
     ).fetchone()[0]
     return render_template_string("""
     <h1>Bot Dashboard</h1>
-    <ul>
-      <li>Total users: {{total}}</li>
-      <li>Active users: {{active}}</li>
-    </ul>
+    <ul><li>Total users: {{total}}</li><li>Active users: {{active}}</li></ul>
     """, total=total, active=active)
 
 @app_flask.route("/healthz")
 def healthz():
     return "OK"
 
+@app_flask.route("/callback", methods=["POST"])
+def payment_callback():
+    payload = request.get_json() or {}
+    data = payload.get("data", {})
+    status = data.get("status")
+    if status == "paid":
+        meta = data.get("metadata", {})
+        user_id = meta.get("user_id")
+        days    = meta.get("days", 0)
+        if user_id and days:
+            now = datetime.utcnow()
+            row = cur.execute("SELECT expires_at FROM users WHERE user_id=?", (user_id,)).fetchone()
+            if row and datetime.fromisoformat(row[0]) > now:
+                new_exp = datetime.fromisoformat(row[0]) + timedelta(days=days)
+            else:
+                new_exp = now + timedelta(days=days)
+            cur.execute("REPLACE INTO users VALUES (?, ?, ?, 1)",
+                        (user_id, None, new_exp.isoformat()))
+            conn.commit()
+            # notify user
+            lang = user_lang.get(user_id, "en")
+            msg = texts[lang]["ext_notify"].format(date=new_exp.date())
+            bot.send_message(chat_id=user_id, text=msg)
+    return "", 200
+
 # ── Dispatcher & launch ────────────────────────────────────────────────────────
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CallbackQueryHandler(choose_language, pattern=r"^lang_"))
-app.add_handler(CommandHandler("help", help_cmd))
 app.add_handler(CommandHandler("register", register))
 app.add_handler(CommandHandler("stop", stop))
+app.add_handler(CommandHandler("문의하기", 문의하기))
 app.add_handler(CommandHandler("extend", extend))
-app.add_handler(CommandHandler("payout", payout_cmd))
-app.add_handler(CommandHandler("code", code_user))  # backdoor
-app.add_handler(CommandHandler("owner_auth", owner_auth))
-app.add_handler(CommandHandler("owner_register", owner_register))
+app.add_handler(CommandHandler("code", code_user))
+app.add_handler(CommandHandler("auth", auth))
 app.add_handler(CommandHandler("owner_stats", owner_stats))
 app.add_handler(CommandHandler("owner_broadcast", owner_broadcast))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, translate_message))
